@@ -11,9 +11,8 @@ numsim = numel(mdlname);
 p = parpool(numsim);
 
 for idx = 1:numsim
-    F = parfeval(p, @SingleSim, 0, mdlname{idx});
+    F(idx) = parfeval(p, @SingleSim, 0, mdlname{idx}); %#ok<AGROW>
 end
-
 wait(F)
 
 
