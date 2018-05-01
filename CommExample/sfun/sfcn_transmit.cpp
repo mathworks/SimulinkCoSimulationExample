@@ -19,7 +19,8 @@
 #define PORT_NUM_P   1
 #define DATA_WIDTH_P 2
 #define STEP_SIZE_P  3
-#define NUM_PRMS     4
+#define TIMEOUT_P    4
+#define NUM_PRMS     5
 
 static bool isPositiveRealDoubleParam(const mxArray *p)
 {
@@ -63,6 +64,13 @@ static void mdlCheckParameters(SimStruct *S)
         ssSetErrorStatus(S,"Step size parameter must be a positive double real scalar.");
         return;
     }
+
+    isValid = isPositiveRealDoubleParam(ssGetSFcnParam(S,TIMEOUT_P));
+    if (!isValid) {
+        ssSetErrorStatus(S,"Timeout in seconds parameter must be a positive double real scalar.");
+        return;
+    }
+
     return;
 }
 #endif /* MDL_CHECK_PARAMETERS */
@@ -90,7 +98,8 @@ static void mdlInitializeSizes(SimStruct *S)
     ssSetSFcnParamTunable(S, HOST_NAME_P, false);
     ssSetSFcnParamTunable(S, PORT_NUM_P, false);
     ssSetSFcnParamTunable(S, STEP_SIZE_P, false);
-
+    ssSetSFcnParamTunable(S, TIMEOUT_P, false);
+    
     if (!ssSetNumInputPorts(S, 1)) return;
 
     double *dataWidthP = reinterpret_cast<double *>(mxGetData(ssGetSFcnParam(S,DATA_WIDTH_P)));
@@ -156,10 +165,8 @@ static std::string host_and_port_addr(const SimStruct *S)
 #define MDL_SETUP_RUNTIME_RESOURCES
 void mdlSetupRuntimeResources(SimStruct *S)
 {
-    std::cout << "Opening connection with server" << std::endl;
-    
     auto connStr = host_and_port_addr(S);
-    ssSetPWorkValue(S, 0, rc_setupruntimeresources_wrapper(connStr));
+    ssSetPWorkValue(S, 0, setupruntimeresources_wrapper(connStr));
 }
 
 /* Function: mdlOutputs =======================================================
@@ -169,9 +176,10 @@ void mdlSetupRuntimeResources(SimStruct *S)
 static void mdlOutputs(SimStruct *S, int_T tid)
 {
     const double *u_ptr = reinterpret_cast<const double *>(ssGetInputPortSignal(S,0));
+    double *timeout_ptr = reinterpret_cast<double *>(mxGetData(ssGetSFcnParam(S,TIMEOUT_P)));
     
     try {
-        transmit_outputs_wrapper(GET_ZM_PTR(S), u_ptr, ssGetInputPortWidth(S,0));
+        transmit_outputs_wrapper(GET_ZM_PTR(S), u_ptr, ssGetInputPortWidth(S,0), *timeout_ptr*1000);
     } catch (std::exception &e) {
         static std::string errstr(e.what());
         ssSetErrorStatus(S, errstr.c_str());
@@ -182,7 +190,7 @@ static void mdlOutputs(SimStruct *S, int_T tid)
 #define MDL_CLEANUP_RUNTIME_RESOURCES
 static void mdlCleanupRuntimeResources(SimStruct *S)
 {
-    std::cout << "Closing connection with server" << std::endl;
+    std::cout << "Closing connection" << std::endl;
     try {
         cleanupruntimeresouces_wrapper(GET_ZM_PTR(S));
     } catch (std::exception &e) {

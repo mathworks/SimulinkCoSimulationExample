@@ -24,8 +24,6 @@
 #define RTP_BETA     0
 #define RTP_INIT_VAL 1
 
-#define MAX_STR_LEN 1024
-
 #define MDL_CHECK_PARAMETERS
 #if defined(MDL_CHECK_PARAMETERS) && defined(MATLAB_MEX_FILE)
 // mdlCheckParameters

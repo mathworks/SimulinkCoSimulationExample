@@ -25,7 +25,8 @@
 #define PORT_NUM_P   1
 #define DATA_WIDTH_P 2
 #define STEP_SIZE_P  3
-#define NUM_PRMS     4
+#define TIMEOUT_P    4
+#define NUM_PRMS     5
 
 static bool isPositiveRealDoubleParam(const mxArray *p)
 {
@@ -45,26 +46,39 @@ class ZmqServer {
   public:
     ZmqServer(const std::string &addr) : context(1), socket_addr(addr)
     {
-        std::cout << "opening server " << socket_addr << std::endl;
         socket_ptr.reset(new zmq::socket_t(context, ZMQ_REP));
         socket_ptr->bind(socket_addr.c_str());
     }
 
     ~ZmqServer() {}
 
-    MsgType receiveRequest(std::vector<double> &u)
+    MsgType receiveRequest(std::vector<double> &u, int request_timeout,
+                           int retries_left = 3)
     {
-        zmq::message_t request;
-        socket_ptr->recv(&request);
-        char *data_str = static_cast<char*>(request.data());
-        data_str[request.size()] = '\0';
-
-        MsgType type;
-        int ulen;
-        
-        std::tie(type, ulen) = decode_header(data_str);
-        decode_data(ulen, data_str, u);
-
+        MsgType type = CONN;
+        while (retries_left) {
+            zmq::message_t request;
+            //  Poll socket for a reply, with timeout
+            zmq::pollitem_t items[] = { {(void*)*socket_ptr, 0, ZMQ_POLLIN, 0 } };
+            zmq::poll (&items[0], 1, request_timeout);
+            
+            //  If we got a reply, process it
+            if (items[0].revents & ZMQ_POLLIN) {
+                
+                socket_ptr->recv(&request);
+                char *data_str = static_cast<char*>(request.data());
+                data_str[request.size()] = '\0';
+                
+                int ulen;                
+                std::tie(type, ulen) = decode_header(data_str);
+                decode_data(ulen, data_str, u);
+                return type;
+            } else if (--retries_left == 0) {
+                throw std::runtime_error("Connection timed out. Please ensure that the transmitter side is running and two sides are not in a locked state due to unintended execution orders. If you have a long running algorithm, you can increase timeout parameter value from the block dialog.");
+            } else {
+                std::cout << "No request received, try again" << std::endl;
+            }
+        }
         return type;
     }
 
@@ -118,6 +132,14 @@ static void mdlCheckParameters(SimStruct *S)
         ssSetErrorStatus(S,"Step size parameter must be a double real scalar.");
         return;
     }
+
+    isValid = isPositiveRealDoubleParam(ssGetSFcnParam(S,TIMEOUT_P));
+    if (!isValid) {
+        ssSetErrorStatus(S,"Timeout in seconds parameter must be a positive double real scalar.");
+        return;
+    }
+
+    
     return;
 }
 #endif /* MDL_CHECK_PARAMETERS */
@@ -146,6 +168,7 @@ static void mdlInitializeSizes(SimStruct *S)
     ssSetSFcnParamTunable(S, HOST_NAME_P, false);
     ssSetSFcnParamTunable(S, PORT_NUM_P, false);
     ssSetSFcnParamTunable(S, STEP_SIZE_P, false);
+    ssSetSFcnParamTunable(S, TIMEOUT_P, false);
     
     if (!ssSetNumInputPorts(S, 0)) return;
 
@@ -211,7 +234,7 @@ static std::string host_and_port_addr(const SimStruct *S)
 #define MDL_SETUP_RUNTIME_RESOURCES
 void mdlSetupRuntimeResources(SimStruct *S)
 {
-    std::cout << "Starting server" << std::endl;
+    std::cout << "Starting connection" << std::endl;
 
     std::string connStr = host_and_port_addr(S);
 
@@ -239,10 +262,19 @@ static void mdlOutputs(SimStruct *S, int_T tid)
     std::string fcnName;
     std::vector<double> uv;
     std::string fcn;
-    
-    auto zmq = GET_ZM_PTR(S);
-    auto r = zmq->receiveRequest(uv);
+    double *timeout_ptr = reinterpret_cast<double *>(mxGetData(ssGetSFcnParam(S,TIMEOUT_P)));
 
+    auto zmq = GET_ZM_PTR(S);
+    MsgType r;
+    
+    try {
+        r = zmq->receiveRequest(uv, (*timeout_ptr)*1000);
+    } catch (std::exception &e) {
+        static std::string errstr(e.what());
+        ssSetErrorStatus(S, errstr.c_str());
+        return;
+    }
+    
     if (r == SHUTDOWN) {
         ssSetStopRequested(S, 1);
         return;
@@ -261,7 +293,7 @@ static void mdlOutputs(SimStruct *S, int_T tid)
 #define MDL_CLEANUP_RUNTIME_RESOURCES
 static void mdlCleanupRuntimeResources(SimStruct *S)
 {
-    std::cout << "Closing connection with server" << std::endl;
+    std::cout << "Closing connection" << std::endl;
     auto zmq = GET_ZM_PTR(S);
     if (zmq) {
         zmq->resetSocketPtr();

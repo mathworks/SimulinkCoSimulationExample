@@ -15,10 +15,7 @@
 
 namespace {
 
-#define REQUEST_TIMEOUT 2500 //  msecs (> 1000)
 #define REQUEST_RETRIES  3 //  Number of tries before we abandon
-
-const char *DELIMITERS = " ,"; // <space> or ","
 
 // class ZmqMgr for managing socket connection with the server
 class ZmqMgr {
@@ -31,8 +28,7 @@ class ZmqMgr {
 
     void sendRequest(const std::string & request_str);
 
-    void retrieveReply(std::vector<double> & yout, int retries_left = REQUEST_RETRIES);
-    void plainRetrieveReply(int retries_left =  REQUEST_RETRIES);
+    void retrieveReply(std::vector<double> & yout, int request_timeout, int retries_left = REQUEST_RETRIES);
     
     void resetSocketPtr()
     {
@@ -62,37 +58,8 @@ void ZmqMgr::sendRequest(const std::string & request_str)
     socket_ptr->send(request);
 }
 
-void ZmqMgr::plainRetrieveReply(int retries_left)
-{
-    assert(socket_ptr);
-    
-    while (retries_left) {
-        zmq::message_t reply;
-        
-        //  Poll socket for a reply, with timeout
-        zmq::pollitem_t items[] = { {(void*)*socket_ptr, 0, ZMQ_POLLIN, 0 } };
-        zmq::poll (&items[0], 1, REQUEST_TIMEOUT);
-        
-        //  If we got a reply, process it
-        if (items[0].revents & ZMQ_POLLIN) {
-            
-            socket_ptr->recv(&reply);
-            char *reply_str = static_cast<char*>(reply.data());
-            reply_str[reply.size()] = '\0';
-
-            std::cout << "Received: " << reply_str << std::endl;
-
-            break;
-        } else if (--retries_left == 0) {
-            throw std::runtime_error("Server connection timed out");
-        } else {
-            std::cout << "No response from server, retrying … " << std::endl;
-        }
-    }
-}
-
 // ZmqMgr class method retrieveReply
-void ZmqMgr::retrieveReply(std::vector<double> & yout, int retries_left)
+    void ZmqMgr::retrieveReply(std::vector<double> & yout, int request_timeout, int retries_left)
 {
     assert(socket_ptr);
     
@@ -101,7 +68,7 @@ void ZmqMgr::retrieveReply(std::vector<double> & yout, int retries_left)
         
         //  Poll socket for a reply, with timeout
         zmq::pollitem_t items[] = { {(void*)*socket_ptr, 0, ZMQ_POLLIN, 0 } };
-        zmq::poll (&items[0], 1, REQUEST_TIMEOUT);
+        zmq::poll (&items[0], 1, request_timeout);
         
         //  If we got a reply, process it
         if (items[0].revents & ZMQ_POLLIN) {
@@ -122,9 +89,9 @@ void ZmqMgr::retrieveReply(std::vector<double> & yout, int retries_left)
             }
             break;
         } else if (--retries_left == 0) {
-            throw std::runtime_error("Server connection timed out");
+            throw std::runtime_error("Connection timed out. Please ensure that the transmitter side is running and two sides are not in a locked state due to unintended execution orders. If you have a long running algorithm, you can increase timeout parameter value from the block dialog.");
         } else {
-            std::cout << "No response from server, retrying … " << std::endl;
+            std::cout << "No response, try again" << std::endl;
         }
     }
 }
@@ -137,7 +104,7 @@ std::unique_ptr<zmq::socket_t> ZmqMgr::createSocket()
     s_ptr->connect(socket_addr.c_str());
     int linger = 0;
     s_ptr->setsockopt (ZMQ_LINGER, &linger, sizeof (linger));
-    std::cout << "Connecting to stats calculator server…" << std::endl;
+    std::cout << "Starting connection" << std::endl;
         
     return s_ptr;
 }
@@ -152,98 +119,10 @@ void shutdown_server(ZmqMgr *zmp)
     zmp->sendRequest(request_str);
 }
 
-// Wrapper functions
-void *setupruntimeresources_wrapper(const std::string & host,
-                                    const std::string & port,
-                                    const std::string & shlibname)
-{
-
-    // start_server(host, port, shlibname);
-    std::string connStr = "tcp://"+host+":5555";
-    std::unique_ptr<ZmqMgr> dzmp(new ZmqMgr(connStr));
-
-    std::string request_str = "model " + port + " " + shlibname;
-    dzmp->sendRequest(request_str);
-    dzmp->plainRetrieveReply();
-    
-    connStr = "tcp://"+host+":"+port;
-    auto zmp = new ZmqMgr(connStr);
-    
-    return reinterpret_cast<void *>(zmp);  
-}
-
-void *rc_setupruntimeresources_wrapper(const std::string &connStr)
+void *setupruntimeresources_wrapper(const std::string &connStr)
 {
     auto zmp = new ZmqMgr(connStr);
     return reinterpret_cast<void *>(zmp);
-}
-
-void start_wrapper(void *zm, double c, double g, double k, double m)
-{
-    std::vector<double> yout;
-    std::string request_str;
-    auto type = PRM_DATA;
-    encode_data(type, {c, g, k, m}, request_str);
-    reinterpret_cast<ZmqMgr *>(zm)->sendRequest(request_str);
-    reinterpret_cast<ZmqMgr *>(zm)->retrieveReply(yout);
-    
-    type = INIT_MTH; // init
-    encode_data(type, {}, request_str);
-    reinterpret_cast<ZmqMgr *>(zm)->sendRequest(request_str);
-    reinterpret_cast<ZmqMgr *>(zm)->retrieveReply(yout);
-}
-
-void outputs_wrapper(void *zm, const double *u_ptr, double *y_ptr)
-{
-    std::vector<double> yout;
-    std::string request_str;
-
-    auto type = INP_DATA;
-    encode_data(type, {*u_ptr}, request_str);
-    reinterpret_cast<ZmqMgr *>(zm)->sendRequest(request_str);
-    reinterpret_cast<ZmqMgr *>(zm)->retrieveReply(yout);
-
-    type = OUTPUT_MTH;
-    encode_data(type, {}, request_str);
-    reinterpret_cast<ZmqMgr *>(zm)->sendRequest(request_str);
-    reinterpret_cast<ZmqMgr *>(zm)->retrieveReply(yout);
-
-    *y_ptr = yout[0];
-}
-
-void rc_outputs_wrapper(void *zm, const double *u_ptr, double *y_ptr, const std::string &fcnname)
-{
-    std::vector<double> yout;
-    std::string request_str;
-
-    auto type = SLFCN_CALL;
-    encode_fcn_data(type, fcnname, {*u_ptr}, request_str);
-    reinterpret_cast<ZmqMgr *>(zm)->sendRequest(request_str);
-    reinterpret_cast<ZmqMgr *>(zm)->retrieveReply(yout);
-    
-    *y_ptr = yout[0];
-}
-
-void update_wrapper(void *zm, const double *u_ptr)
-{
-    std::vector<double> yout;
-    std::string request_str;
-
-    auto type = UPDATE_MTH;
-    encode_data(type, {}, request_str);
-    reinterpret_cast<ZmqMgr *>(zm)->sendRequest(request_str);
-    reinterpret_cast<ZmqMgr *>(zm)->retrieveReply(yout);
-}
-
-void terminate_wrapper(void *zm)
-{
-    std::vector<double> yout;
-    std::string request_str;
-    auto type = TERMINATE_MTH;
-    encode_data(type, {}, request_str);
-    reinterpret_cast<ZmqMgr *>(zm)->sendRequest(request_str);
-    reinterpret_cast<ZmqMgr *>(zm)->retrieveReply(yout);
-
 }
 
 void cleanupruntimeresouces_wrapper(void *zm)
@@ -255,14 +134,7 @@ void cleanupruntimeresouces_wrapper(void *zm)
     }
 }
 
-void query_simulink_function(const char *fcnName)
-{
-    std::string request_str;
-    auto type = SLFCN_QUERY;
-    encode_data(type, {}, request_str);
-}
-
-void transmit_outputs_wrapper(void *zm, const double *u_ptr, const int w)
+void transmit_outputs_wrapper(void *zm, const double *u_ptr, const int w, const double request_timeout)
 {
     std::vector<double> yout;
     std::string request_str;
@@ -275,5 +147,5 @@ void transmit_outputs_wrapper(void *zm, const double *u_ptr, const int w)
     auto type = INP_DATA;
     encode_data(type, uv, request_str);
     reinterpret_cast<ZmqMgr *>(zm)->sendRequest(request_str);
-    reinterpret_cast<ZmqMgr *>(zm)->retrieveReply(yout);
+    reinterpret_cast<ZmqMgr *>(zm)->retrieveReply(yout, request_timeout);
 }
